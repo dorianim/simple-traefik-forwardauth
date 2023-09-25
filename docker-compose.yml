@@ -1,0 +1,32 @@
+version: "3"
+services:
+  traefik:
+    image: docker.io/library/traefik:v2.10
+    command: --api.insecure=true --providers.docker --entrypoints.web.address=:80
+    ports:
+      - 8080:80
+    volumes:
+      #- ./config:/etc/traefik
+      - /var/run/docker.sock:/var/run/docker.sock
+    labels:
+      traefik.enable: true
+      traefik.http.routers.dashboard.rule: Host(`dash.localhost`)
+      traefik.http.routers.dashboard.service: api@internal
+      traefik.http.routers.dashboard.entrypoints: web
+
+  whoami:
+    image: docker.io/traefik/whoami
+    labels:
+      traefik.enable: true
+      traefik.http.routers.whoami.rule: Host(`localhost`)
+      traefik.http.routers.whoami.entrypoints: web
+      traefik.http.routers.whoami.middlewares: simple-forwardauth
+
+  simple-forwardauth:
+    build:
+      context: .
+    env_file: .env
+    labels:
+      traefik.enable: true
+      traefik.http.middlewares.simple-forwardauth.forwardauth.address: http://simple-forwardauth:3759
+      traefik.http.middlewares.simple-forwardauth.forwardauth.authResponseHeaders: x-forwarded-username,x-forwarded-name,x-forwarded-email
