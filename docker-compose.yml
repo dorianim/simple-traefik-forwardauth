@@ -23,8 +23,9 @@ services:
       traefik.http.routers.whoami.middlewares: simple-forwardauth
 
   simple-forwardauth:
-    build:
-      context: .
+    #build:
+    #  context: .
+    image: ghcr.io/dorianim/simple-traefik-forwardauth
     env_file: .env
     labels:
       traefik.enable: true

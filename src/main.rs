@@ -552,5 +552,6 @@ fn set_state_cookie(cookie_jar: PrivateCookieJar, user_state: &UserState) -> Pri
         serde_json::to_string(user_state).expect("Error encoding oidc_state"),
     );
     new_cookie.set_http_only(true);
+    new_cookie.set_path("");
     cookie_jar.add(new_cookie)
 }
