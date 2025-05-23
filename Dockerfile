@@ -1,9 +1,8 @@
-FROM rust:1.68-alpine as build
+FROM rust:1.83-alpine as build
 
 WORKDIR /build
 COPY . .
 ENV RUSTFLAGS='-C target-feature=+crt-static' 
-ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 
 RUN apk add --no-cache build-base pkgconfig openssl-dev ca-certificates
 RUN echo $(rustup show | head -n 1 | awk '{print $NF}') > /platform

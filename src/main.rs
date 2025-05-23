@@ -8,7 +8,7 @@ use axum::response::IntoResponse;
 use axum::response::{Redirect, Response};
 use axum::routing::get;
 use axum::{Extension, Router, ServiceExt};
-use axum_extra::extract::cookie::{Cookie, Key, PrivateCookieJar};
+use axum_extra::extract::cookie::{Cookie, Key, PrivateCookieJar, SameSite};
 use mime::Mime;
 use oauth2::reqwest::async_http_client;
 use oauth2::{PkceCodeVerifier, RefreshToken};
@@ -206,12 +206,14 @@ async fn oauth(
     Query(oauth_parameters): Query<OauthParameters>,
 ) -> Result<(PrivateCookieJar, Redirect), StatusCode> {
     let state_cookie = jar
-        .get(COOKIE_NAME)
-        .expect("state cookie missing")
+    .get(COOKIE_NAME)
+    .expect("state cookie missing");
+
+    let state_cookie_value = state_cookie
         .value()
         .to_string();
 
-    let user_state: UserState = serde_json::from_str(&state_cookie).expect("state cookie invalid");
+    let user_state: UserState = serde_json::from_str(&state_cookie_value).expect("state cookie invalid");
 
     let oidc_state = match user_state {
         UserState::LoggedIn(_) => return Err(StatusCode::OK),
@@ -219,7 +221,8 @@ async fn oauth(
     };
 
     if !oauth_parameters.state.eq(oidc_state.csrf_token.secret()) {
-        panic!("Invalid state!");
+        print!("Invalid state!");
+        return Ok((jar.remove(state_cookie), Redirect::to("/")));
     }
 
     let oidc_client = state.oidc_client.set_redirect_uri(oidc_state.redirect_url);
@@ -546,12 +549,21 @@ impl AppState {
     }
 }
 
-fn set_state_cookie(cookie_jar: PrivateCookieJar, user_state: &UserState) -> PrivateCookieJar {
+fn set_state_cookie(mut cookie_jar: PrivateCookieJar, user_state: &UserState) -> PrivateCookieJar {
     let mut new_cookie = Cookie::new(
         COOKIE_NAME,
         serde_json::to_string(user_state).expect("Error encoding oidc_state"),
     );
+
+    new_cookie.set_same_site(SameSite::Lax);
     new_cookie.set_http_only(true);
     new_cookie.set_path("/");
+
+    if let Some(state_cookie) = cookie_jar
+        .get(COOKIE_NAME)
+    {
+        cookie_jar = cookie_jar.remove(state_cookie);
+    }
+
     cookie_jar.add(new_cookie)
 }
