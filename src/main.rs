@@ -11,11 +11,19 @@ use axum::{Extension, Router, ServiceExt};
 use axum_extra::extract::cookie::{Cookie, Key, PrivateCookieJar, SameSite};
 use mime::Mime;
 use oauth2::reqwest::async_http_client;
-use oauth2::{PkceCodeVerifier, RefreshToken};
-use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
+use oauth2::{
+    EmptyExtraTokenFields, PkceCodeVerifier, RefreshToken, StandardErrorResponse,
+    StandardTokenResponse,
+};
+use openidconnect::core::{
+    CoreAuthDisplay, CoreAuthPrompt, CoreAuthenticationFlow, CoreErrorResponseType,
+    CoreGenderClaim, CoreJsonWebKey, CoreJsonWebKeyType, CoreJsonWebKeyUse,
+    CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm, CoreProviderMetadata,
+    CoreRevocableToken, CoreRevocationErrorResponse, CoreTokenIntrospectionResponse, CoreTokenType,
+};
 use openidconnect::{
-    AccessTokenHash, AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
-    PkceCodeChallenge, RedirectUrl, Scope,
+    AccessTokenHash, AdditionalClaims, AuthorizationCode, Client, ClientId, ClientSecret,
+    CsrfToken, IdTokenFields, IssuerUrl, Nonce, PkceCodeChallenge, RedirectUrl, Scope,
 };
 use openidconnect::{OAuth2TokenResponse, TokenResponse};
 use regex::Regex;
@@ -38,10 +46,45 @@ enum PathFilterStrategy {
     Balacklist,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct AdditionalUserClaims {
+    pub groups: Option<Vec<String>>,
+    pub roles: Option<Vec<String>>,
+}
+impl AdditionalClaims for AdditionalUserClaims {}
+
+type ClientWithAdditionalClaims = Client<
+    AdditionalUserClaims,
+    CoreAuthDisplay,
+    CoreGenderClaim,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJwsSigningAlgorithm,
+    CoreJsonWebKeyType,
+    CoreJsonWebKeyUse,
+    CoreJsonWebKey,
+    CoreAuthPrompt,
+    StandardErrorResponse<CoreErrorResponseType>,
+    StandardTokenResponse<
+        IdTokenFields<
+            AdditionalUserClaims,
+            EmptyExtraTokenFields,
+            CoreGenderClaim,
+            CoreJweContentEncryptionAlgorithm,
+            CoreJwsSigningAlgorithm,
+            CoreJsonWebKeyType,
+        >,
+        CoreTokenType,
+    >,
+    CoreTokenType,
+    CoreTokenIntrospectionResponse,
+    CoreRevocableToken,
+    CoreRevocationErrorResponse,
+>;
+
 #[derive(Clone)]
 struct AppState {
     secret_key: Key,
-    oidc_client: CoreClient,
+    oidc_client: ClientWithAdditionalClaims,
     oidc_scopes: Vec<Scope>,
     path_filter_regex: Option<Regex>,
     path_filter_strategy: PathFilterStrategy,
@@ -98,18 +141,13 @@ async fn main() {
         .unwrap();
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Claims {
-    pub id: String,
-    pub exp: usize,
-    pub iss: String,
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 struct User {
     username: String,
     name: Option<String>,
     email: Option<String>,
+    groups: Option<Vec<String>>,
+    roles: Option<Vec<String>>,
     oidc_token_expires_after: u64,
     oidc_refresh_token: Option<RefreshToken>,
 }
@@ -158,6 +196,14 @@ async fn root(Extension(user_state): Extension<LoggedInState>) -> impl IntoRespo
                 "x-forwarded-email",
                 HeaderValue::from_str(&current_user.email.unwrap_or("".to_owned())).unwrap(),
             );
+            headers.append(
+                "x-forwarded-groups",
+                HeaderValue::from_str(&current_user.groups.unwrap_or_default().join("|")).unwrap(),
+            );
+            headers.append(
+                "x-forwarded-roles",
+                HeaderValue::from_str(&current_user.roles.unwrap_or_default().join("|")).unwrap(),
+            );
             headers
         }
         LoggedInState::Whitelisted => HeaderMap::new(),
@@ -205,15 +251,12 @@ async fn oauth(
     State(state): State<AppState>,
     Query(oauth_parameters): Query<OauthParameters>,
 ) -> Result<(PrivateCookieJar, Redirect), StatusCode> {
-    let state_cookie = jar
-    .get(COOKIE_NAME)
-    .expect("state cookie missing");
+    let state_cookie = jar.get(COOKIE_NAME).expect("state cookie missing");
 
-    let state_cookie_value = state_cookie
-        .value()
-        .to_string();
+    let state_cookie_value = state_cookie.value().to_string();
 
-    let user_state: UserState = serde_json::from_str(&state_cookie_value).expect("state cookie invalid");
+    let user_state: UserState =
+        serde_json::from_str(&state_cookie_value).expect("state cookie invalid");
 
     let oidc_state = match user_state {
         UserState::LoggedIn(_) => return Err(StatusCode::OK),
@@ -268,6 +311,9 @@ async fn oauth(
         .expect("Error calculating time of token expiry")
         .as_secs();
 
+    let additional_claims = claims.additional_claims();
+    println!("Additional claims: {:#?}", additional_claims);
+
     let logged_in_user = User {
         username: claims
             .preferred_username()
@@ -278,6 +324,8 @@ async fn oauth(
             .map(|n| n.get(None).map(|n| n.as_str().to_string()))
             .flatten(),
         email: claims.email().map(|e| e.to_string()),
+        groups: additional_claims.groups.clone(),
+        roles: additional_claims.roles.clone(),
         oidc_token_expires_after,
         oidc_refresh_token: token_response.refresh_token().map(|t| t.to_owned()),
     };
@@ -455,7 +503,7 @@ async fn handle_expired_token(state: &AppState, logged_in_user: User) -> Option<
 }
 
 fn create_oidc_redirect(
-    client: CoreClient,
+    client: ClientWithAdditionalClaims,
     scopes: Vec<Scope>,
     redirect_url: RedirectUrl,
     post_login_redirect_uri: String,
@@ -511,7 +559,7 @@ impl AppState {
         .await
         .unwrap();
 
-        let oidc_client = CoreClient::from_provider_metadata(
+        let oidc_client = ClientWithAdditionalClaims::from_provider_metadata(
             provider_metadata,
             ClientId::new(env::var("OIDC_CLIENT_ID").expect("OIDC_CLIENT_ID must be set")),
             env::var("OIDC_CLIENT_SECRET")
@@ -559,9 +607,7 @@ fn set_state_cookie(mut cookie_jar: PrivateCookieJar, user_state: &UserState) ->
     new_cookie.set_http_only(true);
     new_cookie.set_path("/");
 
-    if let Some(state_cookie) = cookie_jar
-        .get(COOKIE_NAME)
-    {
+    if let Some(state_cookie) = cookie_jar.get(COOKIE_NAME) {
         cookie_jar = cookie_jar.remove(state_cookie);
     }
 
