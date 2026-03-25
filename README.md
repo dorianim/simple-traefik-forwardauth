@@ -40,7 +40,7 @@ services:
     labels:
       traefik.enable: true
       traefik.http.middlewares.simple-forwardauth.forwardauth.address: http://simple-forwardauth:3759
-      traefik.http.middlewares.simple-forwardauth.forwardauth.authResponseHeaders: x-forwarded-username,x-forwarded-name,x-forwarded-email
+      traefik.http.middlewares.simple-forwardauth.forwardauth.authResponseHeaders: x-forwarded-username,x-forwarded-name,x-forwarded-email,x-forwarded-groups,x-forwarded-roles
 ```
 
 ## Config options
@@ -52,6 +52,15 @@ services:
 - `OIDC_SCOPES`: scopes to request, defaults to `profile,email`
 - `PATH_FILTER_REGEX`: a regex to filter pathts to black/white list, defaults to empty
 - `PATH_FILTER_STRATEGY`: can be `Blacklist` or `Whitelist`, defaults to `Whitelist`
+
+## Auth response headers
+
+The following headers are provided to be forwarded to the protected application:
+- `x-forwarded-username`: `preferred_username`-claim
+- `x-forwarded-name`: `name`-claim
+- `x-forwarded-email`: `email`-claim
+- `x-forwarded-groups`: `groups`-claim, groups are seperated by pipes (`|`)
+- `x-forwarded-roles`: `roles`-claim, roles are seperated by pipes (`|`)
 
 ## Note
 
