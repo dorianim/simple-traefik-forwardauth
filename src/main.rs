@@ -37,7 +37,7 @@ use tower_http::trace::TraceLayer;
 use tower_layer::Layer;
 use tracing::Span;
 
-const COOKIE_NAME: &'static str = "simlpe-traefik-forward-auth-state";
+const COOKIE_NAME: &'static str = "simple-traefik-forwardauth-state";
 
 #[derive(Clone, Default)]
 enum PathFilterStrategy {
@@ -249,14 +249,30 @@ async fn use_forwarded_uri<B>(
 async fn oauth(
     jar: PrivateCookieJar,
     State(state): State<AppState>,
+    Host(host): Host,
+    headers: HeaderMap,
     Query(oauth_parameters): Query<OauthParameters>,
 ) -> Result<(PrivateCookieJar, Redirect), StatusCode> {
-    let state_cookie = jar.get(COOKIE_NAME).expect("state cookie missing");
+    let state_cookie = match jar.get(COOKIE_NAME) {
+        Some(state_cookie) => state_cookie,
+        None => {
+            print!("State cookie missing!");
+            return Ok((jar, redirect_to_public_root(&headers, &host)));
+        }
+    };
 
     let state_cookie_value = state_cookie.value().to_string();
 
-    let user_state: UserState =
-        serde_json::from_str(&state_cookie_value).expect("state cookie invalid");
+    let user_state: UserState = match serde_json::from_str(&state_cookie_value) {
+        Ok(user_state) => user_state,
+        Err(_) => {
+            print!("State cookie invalid!");
+            return Ok((
+                jar.remove(state_cookie),
+                redirect_to_public_root(&headers, &host),
+            ));
+        }
+    };
 
     let oidc_state = match user_state {
         UserState::LoggedIn(_) => return Err(StatusCode::OK),
@@ -265,7 +281,10 @@ async fn oauth(
 
     if !oauth_parameters.state.eq(oidc_state.csrf_token.secret()) {
         print!("Invalid state!");
-        return Ok((jar.remove(state_cookie), Redirect::to("/")));
+        return Ok((
+            jar.remove(state_cookie),
+            redirect_to_public_root(&headers, &host),
+        ));
     }
 
     let oidc_client = state.oidc_client.set_redirect_uri(oidc_state.redirect_url);
@@ -336,6 +355,19 @@ async fn oauth(
         set_state_cookie(jar, &UserState::LoggedIn(logged_in_user)),
         Redirect::to(&oidc_state.post_login_redirect_uri),
     ))
+}
+
+fn redirect_to_public_root(headers: &HeaderMap, host: &str) -> Redirect {
+    let host = headers
+        .get("x-forwarded-host")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or(host);
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("http");
+
+    Redirect::to(&format!("{proto}://{host}/"))
 }
 
 async fn auth_middleware<B>(
@@ -612,4 +644,99 @@ fn set_state_cookie(mut cookie_jar: PrivateCookieJar, user_state: &UserState) ->
     }
 
     cookie_jar.add(new_cookie)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+    use openidconnect::{AuthUrl, JsonWebKeySet};
+
+    fn test_app_state() -> AppState {
+        AppState {
+            secret_key: Key::generate(),
+            oidc_client: ClientWithAdditionalClaims::new(
+                ClientId::new("client".to_owned()),
+                None,
+                IssuerUrl::new("https://issuer.example".to_owned()).unwrap(),
+                AuthUrl::new("https://issuer.example/authorize".to_owned()).unwrap(),
+                None,
+                None,
+                JsonWebKeySet::new(Vec::new()),
+            ),
+            oidc_scopes: Vec::new(),
+            path_filter_regex: None,
+            path_filter_strategy: PathFilterStrategy::Whitelist,
+        }
+    }
+
+    fn forwarded_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("public.example"),
+        );
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        headers
+    }
+
+    fn redirect_location(redirect: Redirect) -> String {
+        redirect
+            .into_response()
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_without_state_cookie_redirects_to_public_root() {
+        let (_, redirect) = oauth(
+            PrivateCookieJar::new(Key::generate()),
+            State(test_app_state()),
+            Host("auth.internal:3759".to_owned()),
+            forwarded_headers(),
+            Query(OauthParameters {
+                state: "state".to_owned(),
+                code: "code".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(redirect_location(redirect), "https://public.example/");
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_with_mismatched_state_redirects_to_public_root() {
+        let (_, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+        let oidc_state = OidcState {
+            pkce_verifier,
+            nonce: Nonce::new("nonce".to_owned()),
+            redirect_url: RedirectUrl::new("https://public.example/_oauth".to_owned()).unwrap(),
+            csrf_token: CsrfToken::new("expected-state".to_owned()),
+            post_login_redirect_uri: "https://public.example/".to_owned(),
+        };
+        let jar = set_state_cookie(
+            PrivateCookieJar::new(Key::generate()),
+            &UserState::LoggedOut(oidc_state),
+        );
+
+        let (_, redirect) = oauth(
+            jar,
+            State(test_app_state()),
+            Host("auth.internal:3759".to_owned()),
+            forwarded_headers(),
+            Query(OauthParameters {
+                state: "wrong-state".to_owned(),
+                code: "code".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(redirect_location(redirect), "https://public.example/");
+    }
 }

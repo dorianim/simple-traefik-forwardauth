@@ -41,6 +41,7 @@ services:
       traefik.enable: true
       traefik.http.middlewares.simple-forwardauth.forwardauth.address: http://simple-forwardauth:3759
       traefik.http.middlewares.simple-forwardauth.forwardauth.authResponseHeaders: x-forwarded-username,x-forwarded-name,x-forwarded-email,x-forwarded-groups,x-forwarded-roles
+      traefik.http.middlewares.simple-forwardauth.forwardauth.addAuthCookiesToResponse: simple-traefik-forwardauth-state
 ```
 
 ## Config options
