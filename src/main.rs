@@ -88,6 +88,7 @@ struct AppState {
     oidc_scopes: Vec<Scope>,
     path_filter_regex: Option<Regex>,
     path_filter_strategy: PathFilterStrategy,
+    secure_cookie: bool,
 }
 
 // this impl tells `SignedCookieJar` how to access the key from our state
@@ -352,7 +353,11 @@ async fn oauth(
     println!("User {} logged in successfully!", logged_in_user.username);
 
     Ok((
-        set_state_cookie(jar, &UserState::LoggedIn(logged_in_user)),
+        set_state_cookie(
+            jar,
+            &UserState::LoggedIn(logged_in_user),
+            state.secure_cookie,
+        ),
         Redirect::to(&oidc_state.post_login_redirect_uri),
     ))
 }
@@ -414,7 +419,7 @@ async fn auth_middleware<B>(
     }
 
     let user_state = UserState::LoggedIn(logged_in_user.to_owned());
-    let cookie_jar = set_state_cookie(cookie_jar, &user_state);
+    let cookie_jar = set_state_cookie(cookie_jar, &user_state, state.secure_cookie);
     request
         .extensions_mut()
         .insert(LoggedInState::User(logged_in_user));
@@ -493,7 +498,11 @@ async fn handle_unauthorized_request<B>(
         request.uri().to_string(),
     );
 
-    let updated_jar = set_state_cookie(cookie_jar, &UserState::LoggedOut(oidc_state));
+    let updated_jar = set_state_cookie(
+        cookie_jar,
+        &UserState::LoggedOut(oidc_state),
+        state.secure_cookie,
+    );
 
     return Ok((updated_jar, redirect));
 }
@@ -619,17 +628,30 @@ impl AppState {
             _ => panic!("Invalid PATH_FILTER_STRATEGY: use Whitelist or Blacklist"),
         };
 
+        // Without the Secure attribute, browsers also send the cookie over plain HTTP.
+        let secure_cookie = !env::var("COOKIE_INSECURE")
+            .map(|v| {
+                v.parse::<bool>()
+                    .expect("Invalid COOKIE_INSECURE: use true or false")
+            })
+            .unwrap_or(false);
+
         AppState {
             secret_key,
             oidc_client,
             oidc_scopes,
             path_filter_regex,
             path_filter_strategy,
+            secure_cookie,
         }
     }
 }
 
-fn set_state_cookie(mut cookie_jar: PrivateCookieJar, user_state: &UserState) -> PrivateCookieJar {
+fn set_state_cookie(
+    mut cookie_jar: PrivateCookieJar,
+    user_state: &UserState,
+    secure: bool,
+) -> PrivateCookieJar {
     let mut new_cookie = Cookie::new(
         COOKIE_NAME,
         serde_json::to_string(user_state).expect("Error encoding oidc_state"),
@@ -637,6 +659,7 @@ fn set_state_cookie(mut cookie_jar: PrivateCookieJar, user_state: &UserState) ->
 
     new_cookie.set_same_site(SameSite::Lax);
     new_cookie.set_http_only(true);
+    new_cookie.set_secure(secure);
     new_cookie.set_path("/");
 
     if let Some(state_cookie) = cookie_jar.get(COOKIE_NAME) {
@@ -667,6 +690,7 @@ mod tests {
             oidc_scopes: Vec::new(),
             path_filter_regex: None,
             path_filter_strategy: PathFilterStrategy::Whitelist,
+            secure_cookie: true,
         }
     }
 
@@ -722,6 +746,7 @@ mod tests {
         let jar = set_state_cookie(
             PrivateCookieJar::new(Key::generate()),
             &UserState::LoggedOut(oidc_state),
+            true,
         );
 
         let (_, redirect) = oauth(

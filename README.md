@@ -37,6 +37,7 @@ services:
       OIDC_CLIENT_SECRET=super-secret
       #PATH_FILTER_REGEX='/test'
       #PATH_FILTER_STRATEGY=Blacklist
+      #COOKIE_INSECURE=true
     labels:
       traefik.enable: true
       traefik.http.middlewares.simple-forwardauth.forwardauth.address: http://simple-forwardauth:3759
@@ -53,6 +54,7 @@ services:
 - `OIDC_SCOPES`: scopes to request, defaults to `profile,email`
 - `PATH_FILTER_REGEX`: a regex to filter pathts to black/white list, defaults to empty
 - `PATH_FILTER_STRATEGY`: can be `Blacklist` or `Whitelist`, defaults to `Whitelist`
+- `COOKIE_INSECURE`: set to `true` to send the login cookie without the `Secure` attribute, for browsers that reach Traefik over plain HTTP. Defaults to `false`: browsers only send the cookie over HTTPS
 
 ## Auth response headers
 
